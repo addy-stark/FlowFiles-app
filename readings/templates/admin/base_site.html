@@ -1,0 +1,40 @@
+{% extends "admin/base.html" %}
+{% load static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+<h1 id="site-name">
+    <a href="{% url 'admin:index' %}">{{ site_header|default:_('Django administration') }}</a>
+</h1>
+{% endblock %}
+
+{% block nav-global %}
+<div style="float: right; margin-right: 20px; margin-top: 10px;">
+    <a href="{% url 'admin:index' %}" style="color: #fff; text-decoration: none; padding: 8px 15px; background-color: #417690; border-radius: 4px; font-weight: bold;">
+        ← Admin Home
+    </a>
+</div>
+{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+    /* Make the home button more visible */
+    #header {
+        position: relative;
+        overflow: visible;
+    }
+    
+    /* Improve action dropdown visibility */
+    .actions select {
+        font-weight: bold;
+    }
+    
+    /* Ensure breadcrumbs are visible */
+    .breadcrumbs {
+        padding: 10px 20px;
+        font-size: 13px;
+    }
+</style>
+{% endblock %}

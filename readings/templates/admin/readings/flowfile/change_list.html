@@ -1,0 +1,22 @@
+{% extends "admin/change_list.html" %}
+
+{% block extrahead %}
+{{ block.super }}
+<script type="text/javascript">
+(function() {
+    // Set delete_selected as default action when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+        var actionSelect = document.querySelector('select[name="action"]');
+        if (actionSelect) {
+            // Find the delete_selected option
+            var deleteOption = Array.from(actionSelect.options).find(
+                opt => opt.value === 'delete_selected'
+            );
+            if (deleteOption) {
+                deleteOption.selected = true;
+            }
+        }
+    });
+})();
+</script>
+{% endblock %}
