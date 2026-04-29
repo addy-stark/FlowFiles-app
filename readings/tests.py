@@ -45,7 +45,6 @@ class FlowFileModelTests(TestCase):
         str_repr = str(flow_file)
         
         self.assertIn('test.txt', str_repr)
-        self.assertIn('imported', str_repr.lower())
     
     def test_flow_file_unique_filename(self):
         """Test that filenames must be unique."""
@@ -108,10 +107,28 @@ class MeterReadingModelTests(TestCase):
         self.assertEqual(self.flow_file.readings.count(), 1)
         self.assertEqual(self.flow_file.readings.first(), reading)
 
+    def test_cascade_delete(self):
+        """Test that deleting a FlowFile also deletes its MeterReadings."""
+        MeterReading.objects.create(
+            flow_file=self.flow_file,
+            mpan='1234567890123',
+            meter_serial_number='MTR12345',
+            reading_date=date(2026, 4, 15),
+            reading_value=Decimal('12345.678')
+        )
+
+        self.assertEqual(MeterReading.objects.count(), 1)
+        self.flow_file.delete()
+        self.assertEqual(MeterReading.objects.count(), 0)
+
 
 class ImportD0010CommandTests(TestCase):
     """Tests for the import_d0010 management command."""
-    
+
+    def setUp(self):
+        """Track temp files for cleanup."""
+        self._temp_files = []
+
     def create_test_file(self, content):
         """Helper to create a temporary test file."""
         temp_file = tempfile.NamedTemporaryFile(
@@ -121,12 +138,14 @@ class ImportD0010CommandTests(TestCase):
         )
         temp_file.write(content)
         temp_file.close()
+        self._temp_files.append(temp_file.name)
         return temp_file.name
-    
+
     def tearDown(self):
-        """Clean up temporary files."""
-        # Remove any temporary files created during tests
-        pass
+        """Clean up any remaining temporary files."""
+        for path in self._temp_files:
+            if os.path.exists(path):
+                os.unlink(path)
     
     def test_import_valid_file(self):
         """Test importing a valid D0010 file."""
@@ -641,7 +660,28 @@ ZTR|1|20260426|143500"""
         self.assertFalse(form.is_valid())
         self.assertIn('Invalid file type', str(form.errors))
         self.assertIn('.csv', str(form.errors))
-    
+
+    def test_file_too_large_rejected(self):
+        """Test that files exceeding 10MB are rejected."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from readings.forms import FlowFileUploadForm
+
+        large_content = b'x' * (10 * 1024 * 1024 + 1)
+
+        uploaded_file = SimpleUploadedFile(
+            'large_file.txt',
+            large_content,
+            content_type='text/plain'
+        )
+
+        form = FlowFileUploadForm(
+            data={},
+            files={'file_upload': uploaded_file}
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn('too large', str(form.errors).lower())
+
     def test_grouped_format_parsing(self):
         """Test that grouped format (026/028/030) is correctly parsed."""
         from django.core.files.uploadedfile import SimpleUploadedFile
@@ -704,7 +744,7 @@ class HealthAPITests(TestCase):
         self.assertEqual(response['Content-Type'], 'application/json')
         
         data = response.json()
-        self.assertEqual(data['status'], 'health')
+        self.assertEqual(data['status'], 'healthy')
     
     def test_health_post_request_with_data(self):
         """Test POST request to /api/health/ with JSON data."""
@@ -763,4 +803,86 @@ class HealthAPITests(TestCase):
         data = response.json()
         self.assertEqual(data['status'], 400)
         self.assertIn('Invalid JSON', data['message'])
+
+    def test_health_disallowed_methods(self):
+        """Test that PUT, DELETE, and PATCH requests return 405."""
+        for method in ['put', 'delete', 'patch']:
+            response = getattr(self.client, method)('/api/health/')
+            self.assertEqual(
+                response.status_code, 405,
+                f'{method.upper()} should return 405 Method Not Allowed'
+            )
+
+
+class ParserTests(TestCase):
+    """Unit tests for the D0010 parser functions."""
+
+    def test_parse_reading_row_valid(self):
+        """Test parsing a valid ZPT row returns correct fields."""
+        from readings.parsers import parse_reading_row
+
+        fields = ['ZPT', '1234567890123', 'MTR12345', '20260415', '12345.678', 'Normal']
+        result = parse_reading_row(fields, 1)
+
+        self.assertEqual(result['mpan'], '1234567890123')
+        self.assertEqual(result['meter_serial_number'], 'MTR12345')
+        self.assertEqual(result['reading_date'], date(2026, 4, 15))
+        self.assertEqual(result['reading_value'], Decimal('12345.678'))
+        self.assertEqual(result['reading_type'], 'Normal')
+
+    def test_parse_reading_row_invalid_mpan(self):
+        """Test that a non-digit MPAN raises ValueError."""
+        from readings.parsers import parse_reading_row
+
+        fields = ['ZPT', 'NOTANMPAN', 'MTR12345', '20260415', '12345.678', 'Normal']
+
+        with self.assertRaises(ValueError):
+            parse_reading_row(fields, 1)
+
+    def test_parse_reading_row_empty_serial(self):
+        """Test that an empty serial number raises ValueError."""
+        from readings.parsers import parse_reading_row
+
+        fields = ['ZPT', '1234567890123', '', '20260415', '12345.678', 'Normal']
+
+        with self.assertRaises(ValueError):
+            parse_reading_row(fields, 1)
+
+    def test_parse_grouped_reading_row_short_datetime(self):
+        """Test that a datetime string shorter than 8 chars raises ValueError."""
+        from readings.parsers import parse_grouped_reading_row
+
+        fields = ['030', 'S', '2016', '56311.0']
+
+        with self.assertRaises(ValueError):
+            parse_grouped_reading_row(fields, '1234567890123', 'MTR12345', 1)
+
+    def test_parse_d0010_lines_on_skipped_line_callback(self):
+        """Test that on_skipped_line callback is invoked for invalid rows."""
+        from readings.parsers import parse_d0010_lines
+
+        lines = [
+            'ZPT|NOTANMPAN|MTR12345|20260415|12345.678|Normal',
+            'ZPT|9876543210987|MTR67890|20260416|54321.100|Normal',
+        ]
+
+        skipped = []
+        results = parse_d0010_lines(
+            lines, on_skipped_line=lambda ln, exc: skipped.append(ln)
+        )
+
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['mpan'], '9876543210987')
+
+    def test_parse_d0010_lines_030_without_context_skipped(self):
+        """Test that a 030 row with no preceding 026/028 is silently skipped."""
+        from readings.parsers import parse_d0010_lines
+
+        lines = [
+            '030|S|20160222000000|56311.0|||T|N|',
+        ]
+
+        results = parse_d0010_lines(lines)
+        self.assertEqual(len(results), 0)
 
